@@ -166,7 +166,8 @@ func run() error {
 				if d.IsDir() {
 					return nil
 				}
-				if d.Type() == os.ModeSymlink {
+				if d.Type() != 0 {
+					fmt.Fprintf(os.Stderr, "%s: skipping because of mode %v\n", path, d.Type())
 					return nil
 				}
 				file, err := os.Open(path)
