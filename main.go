@@ -14,7 +14,9 @@ import (
 	"hash/crc64"
 	"hash/fnv"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -43,6 +45,36 @@ func (h discard) BlockSize() int {
 	return 0
 }
 
+type stats struct {
+	startTime       time.Time
+	startUserTime   time.Duration
+	startSystemTime time.Duration
+}
+
+func newStats() (stats, error) {
+	startUserTime, startSystemTime, err := getCPUTimes()
+	if err != nil {
+		return stats{}, err
+	}
+	return stats{time.Now(), startUserTime, startSystemTime}, nil
+}
+
+func (s stats) dump() error {
+	endUserTime, endSystemTime, err := getCPUTimes()
+	if err != nil {
+		return err
+	}
+	userTime := endUserTime - s.startUserTime
+	systemTime := endSystemTime - s.startSystemTime
+	if err != nil {
+		return err
+	}
+	realTime := time.Since(s.startTime)
+	cpuUsage := 100 * float64(userTime+systemTime) / float64(realTime)
+	fmt.Fprintf(os.Stderr, "%v elapsed, %v user, %v system, %.2f%% CPU\n", realTime, userTime, systemTime, cpuUsage)
+	return nil
+}
+
 func getCPUTimes() (time.Duration, time.Duration, error) {
 	var rusage syscall.Rusage
 
@@ -57,15 +89,10 @@ func getCPUTimes() (time.Duration, time.Duration, error) {
 	return userTime, systemTime, nil
 }
 
-func run() error {
-	flagAlgo := flag.String("a", "", "Checksum algorithm (adler32, crc32, crc32c, crc64, fnv32, fnv64, md5, none, sha1, sha256, xxh64).")
-	flagEncoding := flag.String("e", "hex", "Checksum encoding (base64, hex, raw)")
-	flagStats := flag.Bool("stats", false, "Log statistics.")
-	flag.Parse()
-
+func runFile(name, algo, encoding string, r io.Reader) error {
 	var hasher hash.Hash
 
-	switch *flagAlgo {
+	switch algo {
 	case "adler32":
 		hasher = adler32.New()
 	case "crc32":
@@ -89,46 +116,81 @@ func run() error {
 	case "xxh64":
 		hasher = xxhash.New()
 	default:
-		return fmt.Errorf("unknown checksum algorithm %q", *flagAlgo)
+		return fmt.Errorf("unknown checksum algorithm %q", algo)
 	}
 
-	t0 := time.Now()
-
-	startUserTime, startSystemTime, err := getCPUTimes()
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(hasher, os.Stdin); err != nil {
+	if _, err := io.Copy(hasher, r); err != nil {
 		return err
 	}
 
 	checksum := hasher.Sum(nil)
+	suffix := "\n"
+	if name != "" {
+		suffix = " " + name + "\n"
+	}
 
-	switch *flagEncoding {
+	switch encoding {
 	case "base64":
-		fmt.Printf("%s\n", base64.StdEncoding.EncodeToString(checksum))
+		fmt.Printf("%s%s", base64.StdEncoding.EncodeToString(checksum), suffix)
 	case "hex":
-		fmt.Printf("%s\n", hex.EncodeToString(checksum))
+		fmt.Printf("%s%s", hex.EncodeToString(checksum), suffix)
 	case "raw":
 		os.Stdout.Write(checksum)
+		os.Stdout.WriteString(suffix)
 	default:
-		return fmt.Errorf("unknown checksum encoding %q", *flagEncoding)
+		return fmt.Errorf("unknown checksum encoding %q", encoding)
+	}
+
+	return nil
+}
+
+func run() error {
+	flagAlgo := flag.String("a", "", "Checksum algorithm (adler32, crc32, crc32c, crc64, fnv32, fnv64, md5, none, sha1, sha256, xxh64).")
+	flagEncoding := flag.String("e", "hex", "Checksum encoding (base64, hex, raw)")
+	flagStats := flag.Bool("stats", false, "Log statistics.")
+	flag.Parse()
+
+	names := flag.Args()
+
+	stats, err := newStats()
+	if err != nil {
+		return err
+	}
+
+	if len(names) > 0 {
+		for _, name := range names {
+			if err := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
+				}
+				file, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				if err := runFile(path, *flagAlgo, *flagEncoding, file); err != nil {
+					return err
+				}
+				return file.Close()
+			}); err != nil {
+				return err
+			}
+		}
+		if *flagStats {
+			return stats.dump()
+		}
+		return nil
+	}
+
+	if err := runFile("", *flagAlgo, *flagEncoding, os.Stdin); err != nil {
+		return err
 	}
 
 	if *flagStats {
-		endUserTime, endSystemTime, err := getCPUTimes()
-		if err != nil {
-			return err
-		}
-		userTime := endUserTime - startUserTime
-		systemTime := endSystemTime - startSystemTime
-		if err != nil {
-			return err
-		}
-		realTime := time.Since(t0)
-		cpuUsage := 100 * float64(userTime+systemTime) / float64(realTime)
-		fmt.Fprintf(os.Stderr, "%v elapsed, %v user, %v system, %.2f%% CPU\n", realTime, userTime, systemTime, cpuUsage)
+		return stats.dump()
 	}
 
 	return nil
