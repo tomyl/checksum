@@ -166,6 +166,9 @@ func run() error {
 				if d.IsDir() {
 					return nil
 				}
+				if d.Type() == os.ModeSymlink {
+					return nil
+				}
 				file, err := os.Open(path)
 				if err != nil {
 					return err
